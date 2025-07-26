@@ -1,0 +1,108 @@
+import os
+import time
+from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+
+# List of seasons to scrape
+SEASONS = list(range(2020, 2025))
+
+# Create data directories
+data_directory = "new_data"
+directory_standings = os.path.join(data_directory, "standings")  # It will connect data with new_data/standings
+directory_scores = os.path.join(data_directory, "scores")        # It will connect data with new_data/scores
+
+os.makedirs(directory_standings, exist_ok=True)
+os.makedirs(directory_scores, exist_ok=True)
+
+# Create an async function that will get the HTML elements
+async def html_get(url, selector, sleep=3, retries=5):  # Retries ~ number of retries
+    html = None
+    for n in range(1, retries + 1):  # Retry loop
+        time.sleep(sleep * n)  # Wait between retries
+
+        try:
+            async with async_playwright() as ap:
+                browser = await ap.chromium.launch(headless=True)  # Launch browser
+                page = await browser.new_page()
+                await page.goto(url)
+                html = await page.inner_html(selector)  # Get inner HTML of the selected element
+                await browser.close()
+        except PlaywrightTimeout:
+            print(f'Timeout error with {url}')
+            continue  # Retry again
+        else:
+            break  # Exit loop if successful
+
+    return html
+
+# Scrape seasonal monthly schedule links (e.g., Oct, Nov)
+async def season_scrapping(season):
+    url = f"https://www.basketball-reference.com/leagues/NBA_{season}_games.html"  # Scraping base URL
+    html = await html_get(url, '#content .filter')  # HTML selector for filter links
+
+    if not html:
+        print(f"Failed to fetch main season page for {season}")
+        return
+
+    soup = BeautifulSoup(html, 'html.parser')  # Parse with BeautifulSoup
+    links = soup.find_all('a')  # Find all anchor tags
+    href = (link['href'] for link in links)  # Extract hrefs
+    standing_pages_links = [f'https://www.basketball-reference.com{link}' for link in href]
+
+    for url in standing_pages_links:
+        path_save = os.path.join(directory_standings, url.split('/')[-1])  # Save each monthly schedule HTML
+        if os.path.exists(path_save):
+            continue
+
+        html = await html_get(url, "#all_schedule")  # Scrape table with selector
+        if not html:
+            continue
+
+        with open(path_save, 'w+', encoding='utf-8') as file:
+            file.write(html)
+
+# Scrape box scores from each monthly standings file
+async def game_scrapping(file_path):
+    '''Scrape single standings file and save individual box scores'''
+    with open(file_path, 'r', encoding='utf-8') as file:
+        html = file.read()
+
+    soup = BeautifulSoup(html, 'html.parser')  # Parse file
+    links = soup.find_all('a')  # Find all links
+
+    hrefs = [link.get('href') for link in links if link.get('href')]  # Filter valid hrefs
+    box_scores_elements = [
+        f'https://www.basketball-reference.com{link}'
+        for link in hrefs if 'boxscore' in link and '.html' in link
+    ]
+
+    for url in box_scores_elements:
+        path_save = os.path.join(directory_scores, url.split('/')[-1])  # Save path based on filename
+        if os.path.exists(path_save):
+            continue
+
+        html = await html_get(url, '#content')  # Scrape box score page content
+        if not html:
+            continue
+
+        with open(path_save, 'w+', encoding='utf-8') as file:
+            file.write(html)
+
+# MAIN EXECUTION
+import asyncio
+
+async def main():
+    for season in SEASONS:
+        await season_scrapping(season)  # Step 1: Scrap monthly season schedules
+
+    all_files_standings = [
+        file for file in os.listdir(directory_standings) if file.endswith('.html')
+    ]
+
+    for file in all_files_standings:  # Step 2: Loop through standings and get each box score
+        file_path = os.path.join(directory_standings, file)
+        await game_scrapping(file_path)
+
+# Run the script
+if __name__ == "__main__":
+    asyncio.run(main())
